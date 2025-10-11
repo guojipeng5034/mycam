@@ -30,7 +30,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CoroutineExceptionHandler
 import java.io.ByteArrayOutputStream
-import android.graphics.Bitmap
 import android.graphics.ImageFormat
 import android.graphics.YuvImage
 import java.util.concurrent.Executor
@@ -42,6 +41,10 @@ import androidx.camera.core.CameraInfo
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import android.hardware.camera2.CameraCharacteristics
 import com.example.mycam.util.NetworkInfo
+import com.example.mycam.util.PreviewHolder
+import android.view.Surface
+import android.view.WindowManager
+import android.view.OrientationEventListener
  
 import android.util.Log
 
@@ -62,15 +65,41 @@ class StreamingService : LifecycleService() {
     private var lastFpsTimestampNs: Long = 0L
     private var framesCount: Int = 0
     private lateinit var mainExecutor: Executor
+    // Single thread is actually faster for sequential frame processing
     private val analyzeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val jpegStream = ReusableByteArrayOutputStream(1_048_576)
     @Volatile private var nv21Buffer: ByteArray? = null
+    @Volatile private var rotatedBuffer: ByteArray? = null // Reusable buffer for rotation
+    private var currentCameraInfo: CameraInfo? = null
+    @Volatile private var deviceOrientation: Int = 0 // Physical device orientation in degrees
+    private var orientationEventListener: OrientationEventListener? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIF_ID, buildNotification("Starting server..."))
         mainExecutor = ContextCompat.getMainExecutor(this)
+        
+        // Listen to physical device orientation changes
+        orientationEventListener = object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                // Map continuous orientation to discrete 0/90/180/270
+                // orientation: 0=portrait, 90=left landscape, 180=upside down, 270=right landscape
+                deviceOrientation = when {
+                    orientation >= 315 || orientation < 45 -> 0      // Portrait
+                    orientation >= 45 && orientation < 135 -> 90     // Left landscape (home on right)
+                    orientation >= 135 && orientation < 225 -> 180   // Upside down
+                    orientation >= 225 && orientation < 315 -> 270   // Right landscape (home on left)
+                    else -> 0
+                }
+                Log.d(TAG, "Device physical orientation: raw=$orientation, mapped=$deviceOrientation degrees")
+            }
+        }
+        if (orientationEventListener?.canDetectOrientation() == true) {
+            orientationEventListener?.enable()
+        }
+        
         scope.launch {
             server = MjpegHttpServer(port = 8080).also { it.start() }
             startCamera()
@@ -97,6 +126,7 @@ class StreamingService : LifecycleService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        orientationEventListener?.disable()
         scope.launch { server?.stop() }
         cameraProvider?.unbindAll()
         scope.cancel()
@@ -145,8 +175,9 @@ class StreamingService : LifecycleService() {
             val maxFps = queryMaxSupportedFps(selector)
             extender.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(maxFps, maxFps))
             
-            // Reset NV21 buffer to be recalculated per actual frame size
+            // Reset buffers when resolution changes
             nv21Buffer = null
+            rotatedBuffer = null
             val analysisUseCase = analysisBuilder.build()
             analysisUseCase.setAnalyzer(analyzeExecutor) { image ->
                 try {
@@ -159,21 +190,75 @@ class StreamingService : LifecycleService() {
                     image.close()
                 }
             }
+            // Get preview view from holder
+            val previewView = PreviewHolder.getPreviewView()
+            
             provider.unbindAll()
-            provider.bindToLifecycle(this, selector, analysisUseCase)
-            analysis = analysisUseCase
+            
+            // Bind both Preview and ImageAnalysis together
+            if (previewView != null) {
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                val camera = provider.bindToLifecycle(this, selector, preview, analysisUseCase)
+                currentCameraInfo = camera.cameraInfo
+                analysis = analysisUseCase
+                StreamControl.setCameraControl(camera.cameraControl)
+                Log.d(TAG, "Bound both Preview and ImageAnalysis")
+            } else {
+                // Fallback: bind only ImageAnalysis
+                val camera = provider.bindToLifecycle(this, selector, analysisUseCase)
+                currentCameraInfo = camera.cameraInfo
+                analysis = analysisUseCase
+                StreamControl.setCameraControl(camera.cameraControl)
+                Log.w(TAG, "PreviewView not available, bound ImageAnalysis only")
+            }
         }
     }
 
 
     private fun yuv420ToJpegIntoBuffer(image: ImageProxy): Pair<ByteArray?, Int> {
+        val startTime = System.nanoTime()
+        val rotationDegrees = getRotationDegrees()
+        
+        // Convert YUV to NV21 with rotation applied at YUV level for better performance
+        val nv21Start = System.nanoTime()
         val nv21 = yuv420888ToNv21(image, horizontalMirror = false, reuse = nv21Buffer)
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
+        val nv21Time = (System.nanoTime() - nv21Start) / 1_000_000
+        
+        // Apply rotation to YUV data directly (more efficient than rotating JPEG)
+        val rotateStart = System.nanoTime()
+        val (rotatedNv21, rotatedWidth, rotatedHeight) = when (rotationDegrees) {
+            90, 270 -> {
+                val rotated = rotateNv21(nv21, image.width, image.height, rotationDegrees)
+                Triple(rotated, image.height, image.width) // Width and height swap for 90/270
+            }
+            180 -> {
+                val rotated = rotateNv21(nv21, image.width, image.height, rotationDegrees)
+                Triple(rotated, image.width, image.height)
+            }
+            else -> Triple(nv21, image.width, image.height)
+        }
+        val rotateTime = (System.nanoTime() - rotateStart) / 1_000_000
+        
+        val yuvImage = YuvImage(rotatedNv21, ImageFormat.NV21, rotatedWidth, rotatedHeight, null)
         jpegStream.reset()
-        val crop = calculateCenterCrop16x9(image.width, image.height)
+        
+        // Restore 16:9 crop for better aesthetics
+        val jpegStart = System.nanoTime()
+        val crop = calculateCenterCrop16x9(rotatedWidth, rotatedHeight)
         val quality = StreamControl.jpegQuality.value
         val ok = yuvImage.compressToJpeg(crop, quality, jpegStream)
+        val jpegTime = (System.nanoTime() - jpegStart) / 1_000_000
+        
         if (!ok) return Pair(null, 0)
+        
+        val totalTime = (System.nanoTime() - startTime) / 1_000_000
+        // Reduce logging frequency to save CPU
+        if (framesCount % 30 == 0) { // Log every 30 frames
+            Log.d(TAG, "Frame processing: total=${totalTime}ms (nv21=${nv21Time}ms, rotate=${rotateTime}ms, jpeg=${jpegTime}ms)")
+        }
+        
         return Pair(jpegStream.buffer(), jpegStream.size())
     }
 
@@ -309,6 +394,121 @@ class StreamingService : LifecycleService() {
         }
 
         return nv21
+    }
+
+    private fun getRotationDegrees(): Int {
+        try {
+            // Use physical device orientation from sensor
+            val deviceRotation = deviceOrientation
+            
+            // Get camera sensor orientation
+            val cameraInfo = currentCameraInfo
+            val sensorOrientation = if (cameraInfo != null) {
+                val c2Info = Camera2CameraInfo.from(cameraInfo)
+                c2Info.getCameraCharacteristic(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            } else {
+                90 // Most cameras are 90 degrees (landscape sensor)
+            }
+            
+            // Calculate the rotation needed to make the image upright
+            // Camera sensor orientation is relative to natural device orientation (portrait)
+            // We need to rotate to compensate for device rotation
+            val lensFacing = StreamControl.lensFacing.value
+            
+            val rotation = (sensorOrientation - deviceRotation + 360) % 360
+            
+            // Fix: For back camera in landscape mode, swap 0 and 180 degrees
+            val finalRotation = if (lensFacing == CameraCharacteristics.LENS_FACING_BACK && (rotation == 0 || rotation == 180)) {
+                if (rotation == 0) 180 else 0
+            } else {
+                rotation
+            }
+            
+            Log.d(TAG, "Rotation: sensor=$sensorOrientation, device=$deviceRotation, calculated=$rotation, final=$finalRotation, facing=$lensFacing")
+            
+            return finalRotation
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting rotation degrees", e)
+            return 0
+        }
+    }
+    
+    private fun rotateNv21(data: ByteArray, width: Int, height: Int, rotation: Int): ByteArray {
+        if (rotation == 0) return data
+        
+        // Reuse rotation buffer to avoid allocation
+        val rotated = if (rotatedBuffer != null && rotatedBuffer!!.size == data.size) {
+            rotatedBuffer!!
+        } else {
+            ByteArray(data.size).also { rotatedBuffer = it }
+        }
+        val ySize = width * height
+        
+        when (rotation) {
+            90 -> {
+                // Rotate Y plane 90 degrees counter-clockwise (optimized with row-based access)
+                for (x in 0 until width) {
+                    val destOffset = x * height
+                    for (y in 0 until height) {
+                        rotated[destOffset + (height - 1 - y)] = data[y * width + x]
+                    }
+                }
+                
+                // Rotate UV plane 90 degrees counter-clockwise
+                val uvHeight = height / 2
+                for (x in 0 until width step 2) {
+                    val destOffset = ySize + (x / 2) * height
+                    for (y in 0 until uvHeight) {
+                        val srcOffset = ySize + y * width + x
+                        val destIdx = destOffset + (uvHeight - 1 - y) * 2
+                        rotated[destIdx] = data[srcOffset]
+                        rotated[destIdx + 1] = data[srcOffset + 1]
+                    }
+                }
+            }
+            180 -> {
+                // Rotate Y plane 180 degrees (optimized)
+                val lastY = ySize - 1
+                for (i in 0 until ySize) {
+                    rotated[i] = data[lastY - i]
+                }
+                
+                // Rotate UV plane 180 degrees
+                val uvSize = ySize / 2
+                val lastUV = ySize + uvSize - 2
+                var destIdx = ySize
+                var srcIdx = lastUV
+                while (srcIdx >= ySize) {
+                    rotated[destIdx] = data[srcIdx]
+                    rotated[destIdx + 1] = data[srcIdx + 1]
+                    destIdx += 2
+                    srcIdx -= 2
+                }
+            }
+            270 -> {
+                // Rotate Y plane 270 degrees counter-clockwise (optimized with row-based access)
+                for (x in 0 until width) {
+                    val destOffset = (width - 1 - x) * height
+                    for (y in 0 until height) {
+                        rotated[destOffset + y] = data[y * width + x]
+                    }
+                }
+                
+                // Rotate UV plane 270 degrees counter-clockwise  
+                val uvHeight = height / 2
+                for (x in 0 until width step 2) {
+                    val destOffset = ySize + ((width - 2 - x) / 2) * height
+                    for (y in 0 until uvHeight) {
+                        val srcOffset = ySize + y * width + x
+                        val destIdx = destOffset + y * 2
+                        rotated[destIdx] = data[srcOffset]
+                        rotated[destIdx + 1] = data[srcOffset + 1]
+                    }
+                }
+            }
+        }
+        
+        return rotated
     }
 
     private fun trackFps() {
