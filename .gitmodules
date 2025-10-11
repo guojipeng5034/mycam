@@ -1,0 +1,3 @@
+[submodule "app/src/main/cpp/zlm"]
+	path = app/src/main/cpp/zlm
+	url = https://github.com/yunianvh/ZLMediaKit-Android-Stream

@@ -1,0 +1,55 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 摄像头主体 -->
+    <path
+        android:fillColor="#4169E1"
+        android:pathData="M30,35h48c8.8,0 16,7.2 16,16v6c0,8.8 -7.2,16 -16,16H30c-8.8,0 -16,-7.2 -16,-16v-6C14,42.2 21.2,35 30,35z" />
+    
+    <!-- 摄像头镜头 -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M54,47m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0" />
+    
+    <!-- 镜头反射 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M50,43m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+    
+    <!-- 摄像头支架 -->
+    <path
+        android:fillColor="#808080"
+        android:pathData="M44,73h20c2.2,0 4,1.8 4,4v8c0,2.2 -1.8,4 -4,4H44c-2.2,0 -4,-1.8 -4,-4v-8C40,74.8 41.8,73 44,73z" />
+    
+    <!-- 支架连接杆 -->
+    <path
+        android:fillColor="#696969"
+        android:pathData="M52,67h4c1.1,0 2,0.9 2,2v6c0,1.1 -0.9,2 -2,2h-4c-1.1,0 -2,-0.9 -2,-2v-6C50,67.9 50.9,67 52,67z" />
+    
+    <!-- 摄像头天线 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFF"
+        android:pathData="M32,25L32,15" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFF"
+        android:pathData="M76,25L76,15" />
+    
+    <!-- 天线顶端 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,15m-1,0a1,1 0,1 1,2 0a1,1 0,1 1,-2 0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M78,15m-1,0a1,1 0,1 1,2 0a1,1 0,1 1,-2 0" />
+    
+    <!-- 摄像头指示灯 -->
+    <path
+        android:fillColor="#FF0000"
+        android:pathData="M38,41m-1,0a1,1 0,1 1,2 0a1,1 0,1 1,-2 0" />
+</vector>
