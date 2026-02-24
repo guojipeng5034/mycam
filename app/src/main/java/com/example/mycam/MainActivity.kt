@@ -237,9 +237,6 @@ private fun PreviewCard(
                         setCameraFlip(lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_FRONT, false)
                     }
                 }
-                LaunchedEffect(lensFacing) {
-                    openGlView.setCameraFlip(lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_FRONT, false)
-                }
                 DisposableEffect(openGlView) {
                     StreamPreviewHolder.setPreviewView(openGlView)
                     onDispose { StreamPreviewHolder.clear() }

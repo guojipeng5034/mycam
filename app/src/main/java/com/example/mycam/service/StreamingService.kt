@@ -11,7 +11,6 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.LifecycleService
-import androidx.lifecycle.lifecycleScope
 import com.example.mycam.MainActivity
 import com.example.mycam.R
 import com.example.mycam.model.Resolution
@@ -22,9 +21,6 @@ import com.pedro.common.VideoCodec
 import com.pedro.encoder.input.video.CameraHelper
 import com.pedro.library.util.FpsListener
 import com.pedro.rtspserver.RtspServerCamera2
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.launch
 
 /**
  * MyCam 2.0 推流服务
@@ -56,7 +52,6 @@ class StreamingService : LifecycleService() {
 
     private var rtspCamera: RtspServerCamera2? = null
     private var isStreaming = false
-    private var lensFacingJob: Job? = null
 
     private val connectChecker = object : ConnectChecker {
         override fun onConnectionSuccess() {
@@ -195,27 +190,6 @@ class StreamingService : LifecycleService() {
             val cam = rtspCamera!!
             StreamControl.setZoomHandler { level -> runOnMain { try { cam.setZoom(level) } catch (_: Throwable) {} } }
             isStreaming = true
-            lensFacingJob = lifecycleScope.launch {
-                StreamControl.lensFacing.drop(1).collect { newLensFacing ->
-                    if (isStreaming) {
-                        runOnMain {
-                            try {
-                                val openGlView = StreamPreviewHolder.getPreviewView()
-                                // 与启动时一致：前置 180°、后置 0°；先设置再切换避免帧错乱
-                                val rotation = if (newLensFacing == androidx.camera.core.CameraSelector.LENS_FACING_BACK) 0 else 180
-                                val isFront = newLensFacing == androidx.camera.core.CameraSelector.LENS_FACING_FRONT
-                                openGlView?.setStreamRotation(rotation)
-                                openGlView?.setCameraFlip(isFront, false)
-                                cam.switchCamera()
-                                Log.d(TAG, "Camera switched, rotation=$rotation, isFront=$isFront")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "switchCamera failed", e)
-                                updateNotification("Camera switch failed: ${e.message}")
-                            }
-                        }
-                    }
-                }
-            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start RTSP stream", e)
             runOnMain {
@@ -237,8 +211,6 @@ class StreamingService : LifecycleService() {
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping stream", e)
         }
-        lensFacingJob?.cancel()
-        lensFacingJob = null
         isStreaming = false
         StreamControl.setRtspStreamUrl("")
         StreamControl.setFps(0)

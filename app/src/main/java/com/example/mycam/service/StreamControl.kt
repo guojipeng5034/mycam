@@ -19,7 +19,7 @@ object StreamControl {
     private val _fps = MutableStateFlow(0)
     val fps: StateFlow<Int> = _fps.asStateFlow()
 
-    private val _targetFps = MutableStateFlow(60)
+    private val _targetFps = MutableStateFlow(30)
     val targetFps: StateFlow<Int> = _targetFps.asStateFlow()
 
     /** 目标码率 (Mbps)，1–12，默认 5 */
