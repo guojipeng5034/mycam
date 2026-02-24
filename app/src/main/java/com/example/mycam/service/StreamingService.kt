@@ -201,9 +201,8 @@ class StreamingService : LifecycleService() {
                         runOnMain {
                             try {
                                 val openGlView = StreamPreviewHolder.getPreviewView()
-                                // 先设置目标摄像头的 rotation 和 flip，再切换（避免帧错乱）
-                                // 切换时需与启动时相反：后置 180°、前置 0°（RootEncoder switchCamera 内部行为不同）
-                                val rotation = if (newLensFacing == androidx.camera.core.CameraSelector.LENS_FACING_BACK) 180 else 0
+                                // 与启动时一致：前置 180°、后置 0°；先设置再切换避免帧错乱
+                                val rotation = if (newLensFacing == androidx.camera.core.CameraSelector.LENS_FACING_BACK) 0 else 180
                                 val isFront = newLensFacing == androidx.camera.core.CameraSelector.LENS_FACING_FRONT
                                 openGlView?.setStreamRotation(rotation)
                                 openGlView?.setCameraFlip(isFront, false)
@@ -211,6 +210,7 @@ class StreamingService : LifecycleService() {
                                 Log.d(TAG, "Camera switched, rotation=$rotation, isFront=$isFront")
                             } catch (e: Exception) {
                                 Log.e(TAG, "switchCamera failed", e)
+                                updateNotification("Camera switch failed: ${e.message}")
                             }
                         }
                     }

@@ -23,7 +23,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.ui.viewinterop.AndroidView
@@ -32,7 +31,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.mycam.model.Resolution
 import com.example.mycam.service.StreamControl
 import com.example.mycam.service.StreamingService
-import com.example.mycam.R
 import com.example.mycam.ui.theme.MyCamTheme
 import com.example.mycam.util.StreamPreviewHolder
 import com.example.mycam.viewmodel.StreamViewModel
@@ -136,7 +134,7 @@ fun MainScreen() {
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold) },
+                title = { Text("MyCam", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
