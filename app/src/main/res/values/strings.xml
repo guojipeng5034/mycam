@@ -1,8 +1,8 @@
 <resources>
-    <string name="app_name">MyCam</string>
+    <string name="app_name">我的摄像头</string>
     <string name="app_description">将手机摄像头作为PC虚拟摄像头使用</string>
     <string name="camera_stream_channel">Camera Stream Service</string>
-    <string name="notification_title">MyCam 正在直播</string>
+    <string name="notification_title">我的摄像头 正在直播</string>
     <string name="notification_text">点击打开应用</string>
     <string name="privacy_policy">隐私政策</string>
     <string name="privacy_description">本应用仅使用摄像头权限进行视频流传输，不会收集或存储任何个人数据。</string>
