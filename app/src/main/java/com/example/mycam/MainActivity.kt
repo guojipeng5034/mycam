@@ -1,59 +1,79 @@
 package com.example.mycam
 
+import android.content.ClipData
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.text.AnnotatedString
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import android.hardware.camera2.CameraCharacteristics
-import androidx.core.content.ContextCompat
-import com.example.mycam.service.StreamingService
-import com.example.mycam.ui.theme.MyCamTheme
-import com.example.mycam.util.NetworkInfo
-import com.example.mycam.util.PreviewHolder
-import kotlinx.coroutines.launch
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.mycam.model.Resolution
+import com.example.mycam.service.StreamControl
+import com.example.mycam.service.StreamingService
+import com.example.mycam.R
+import com.example.mycam.ui.theme.MyCamTheme
+import com.example.mycam.util.StreamPreviewHolder
+import com.example.mycam.viewmodel.StreamViewModel
+import com.pedro.encoder.utils.gl.AspectRatioMode
+import com.pedro.library.view.OpenGlView
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {}
 
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {}
+
+    private val notificationsPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {}
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        requestPermissions()
         setContent {
             MyCamTheme {
                 MainScreen()
             }
+        }
+    }
+
+    private fun requestPermissions() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationsPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 }
@@ -65,45 +85,58 @@ fun MainScreen() {
     val lifecycleOwner = LocalLifecycleOwner.current
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+
     var streaming by remember { mutableStateOf(false) }
-    val ip = NetworkInfo.getDeviceIp(context) ?: "0.0.0.0"
-    val url = "http://$ip:8080/mjpeg"
-    val fps by com.example.mycam.service.StreamControl.fps.collectAsState(initial = 0)
-    var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_FRONT) }
-    var resolution by remember { mutableStateOf(com.example.mycam.model.Resolution.VGA) }
-    var quality by remember { mutableStateOf(45f) }
+    val rtspUrl by StreamControl.rtspStreamUrl.collectAsStateWithLifecycle(initialValue = "")
+    val fps by StreamControl.fps.collectAsStateWithLifecycle(initialValue = 0)
+    val resolution by StreamControl.resolution.collectAsStateWithLifecycle()
+    val bitrateMbps by StreamControl.videoBitrateMbps.collectAsStateWithLifecycle()
+    val lensFacing by StreamControl.lensFacing.collectAsStateWithLifecycle()
+
     var zoomRatio by remember { mutableStateOf(1f) }
     var cameraControl by remember { mutableStateOf<androidx.camera.core.CameraControl?>(null) }
-    val serviceCameraControl by com.example.mycam.service.StreamControl.cameraControl.collectAsState()
+    val serviceCameraControl by StreamControl.cameraControl.collectAsStateWithLifecycle()
 
+    val displayUrl = when {
+        rtspUrl.isNotEmpty() -> rtspUrl
+        streaming -> "rtsp://<IP>:${StreamingService.RTSP_PORT}/live (连接中...)"
+        else -> "rtsp://<IP>:${StreamingService.RTSP_PORT}/live (启动后显示)"
+    }
+
+    // 相机列表
     LaunchedEffect(Unit) {
-        try {
-            val providerFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(context)
-            providerFuture.addListener({
-                try {
-                    val provider = providerFuture.get()
-                    val list = provider.availableCameraInfos.map { info ->
-                        val c2 = Camera2CameraInfo.from(info)
-                        val camId = c2.cameraId
-                        val facing = c2.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
-                        val label = if (facing == CameraCharacteristics.LENS_FACING_BACK) "Back ($camId)" else "Front ($camId)"
-                        com.example.mycam.service.StreamControl.CameraDesc(camId, label)
-                    }
-                    com.example.mycam.service.StreamControl.setCameras(list)
-                    if (com.example.mycam.service.StreamControl.selectedCameraId.value == null && list.isNotEmpty()) {
-                        com.example.mycam.service.StreamControl.setSelectedCameraId(list.first().id)
-                    }
-                } catch (_: Throwable) {}
-            }, ContextCompat.getMainExecutor(context))
-        } catch (_: Throwable) {}
+        androidx.camera.lifecycle.ProcessCameraProvider.getInstance(context).addListener({
+            try {
+                val provider = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(context).get()
+                val list = provider.availableCameraInfos.map { info ->
+                    val c2 = androidx.camera.camera2.interop.Camera2CameraInfo.from(info)
+                    val camId = c2.cameraId
+                    val facing = c2.getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.LENS_FACING)
+                    val label = if (facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK) "Back ($camId)" else "Front ($camId)"
+                    StreamControl.CameraDesc(camId, label)
+                }
+                StreamControl.setCameras(list)
+                if (StreamControl.selectedCameraId.value == null && list.isNotEmpty()) {
+                    StreamControl.setSelectedCameraId(list.first().id)
+                }
+            } catch (_: Throwable) {}
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    // 推流启动：延迟以确保 OpenGlView 已布局，再启动服务
+    LaunchedEffect(streaming) {
+        if (streaming) {
+            delay(250)
+            StreamViewModel.startStreaming(context)
+        }
     }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text("MyCam", fontWeight = FontWeight.Bold) },
+                title = { Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -119,298 +152,392 @@ fun MainScreen() {
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Preview Card with FPS overlay
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    // Camera Preview - Always running, managed by StreamingService
-                    val previewView = remember { 
-                        PreviewView(context).apply {
-                            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
-                        }
-                    }
-                    
-                    // Register preview view to PreviewHolder so StreamingService can use it
-                    DisposableEffect(previewView) {
-                        PreviewHolder.setPreviewView(previewView)
-                        onDispose {
-                            PreviewHolder.clear()
-                        }
-                    }
-                    
-                    // Trigger camera rebind when lensFacing changes
-                    LaunchedEffect(lensFacing, streaming) {
-                        if (streaming) {
-                            // StreamingService will handle camera binding
-                        } else {
-                            // When not streaming, bind preview only
-                            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                            cameraProviderFuture.addListener({
-                                try {
-                                    val cameraProvider = cameraProviderFuture.get()
-                                    val preview = Preview.Builder().build().also {
-                                        it.setSurfaceProvider(previewView.surfaceProvider)
-                                    }
-                                    val selector = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
-                                        CameraSelector.DEFAULT_BACK_CAMERA
-                                    } else {
-                                        CameraSelector.DEFAULT_FRONT_CAMERA
-                                    }
-                                    
-                                    cameraProvider.unbindAll()
-                                    val camera = cameraProvider.bindToLifecycle(
-                                        lifecycleOwner,
-                                        selector,
-                                        preview
-                                    )
-                                    cameraControl = camera.cameraControl
-                                    
-                                    // Reset zoom when switching cameras
-                                    zoomRatio = 1f
-                                    camera.cameraControl.setZoomRatio(1f)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }, ContextCompat.getMainExecutor(context))
-                        }
-                    }
-                    
-                    AndroidView(
-                        factory = { previewView },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
-                            .clip(RoundedCornerShape(16.dp))
-                    )
-                    
-                    // FPS Badge (left-top corner)
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(12.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color.Black.copy(alpha = 0.6f)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                if (streaming) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                                contentDescription = null,
-                                tint = if (streaming) Color.Green else Color.Gray,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = "$fps FPS",
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+            // 预览区域：推流时用 OpenGlView（RootEncoder 渲染），非推流时用 CameraX PreviewView
+            PreviewCard(
+                streaming = streaming,
+                lensFacing = lensFacing,
+                lifecycleOwner = lifecycleOwner,
+                zoomRatio = zoomRatio,
+                onZoomChange = { zoomRatio = it },
+                cameraControl = cameraControl,
+                serviceCameraControl = serviceCameraControl,
+                onCameraControlUpdate = { cameraControl = it },
+                fps = fps
+            )
+
+            // RTSP URL 卡片
+            RtpUrlCard(
+                displayUrl = displayUrl,
+                onCopy = {
+                    if (displayUrl.isNotBlank() && !displayUrl.contains("<IP>")) {
+                        scope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("rtsp", displayUrl)))
+                            snackbarHostState.showSnackbar("RTSP URL 已复制")
                         }
                     }
                 }
-                
-                // Zoom Slider - Works for both front and back cameras
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Zoom",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            "${String.format("%.1f", zoomRatio)}x",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        IconButton(
-                            onClick = {
-                                val newZoom = (zoomRatio - 0.5f).coerceAtLeast(1f)
-                                zoomRatio = newZoom
-                                // Use service camera control when streaming, otherwise use local control
-                                val control = serviceCameraControl ?: cameraControl
-                                control?.setZoomRatio(newZoom)
-                            },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.Remove,
-                                contentDescription = "Zoom out",
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Slider(
-                            value = zoomRatio,
-                            onValueChange = { newZoom ->
-                                zoomRatio = newZoom
-                                // Use service camera control when streaming, otherwise use local control
-                                val control = serviceCameraControl ?: cameraControl
-                                control?.setZoomRatio(newZoom)
-                            },
-                            valueRange = 1f..30f,
-                            modifier = Modifier.weight(1f),
-                            steps = 0 // Smooth continuous zoom
-                        )
-                        IconButton(
-                            onClick = {
-                                val newZoom = (zoomRatio + 0.5f).coerceAtMost(30f)
-                                zoomRatio = newZoom
-                                // Use service camera control when streaming, otherwise use local control
-                                val control = serviceCameraControl ?: cameraControl
-                                control?.setZoomRatio(newZoom)
-                            },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.Add,
-                                contentDescription = "Zoom in",
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
+            )
+
+            // 设置卡片
+            SettingsCard(
+                resolution = resolution,
+                bitrateMbps = bitrateMbps,
+                lensFacing = lensFacing,
+                streaming = streaming,
+                onResolutionChange = {
+                    StreamControl.setResolution(it)
+                },
+                onBitrateChange = {
+                    StreamControl.setVideoBitrateMbps(it)
+                },
+                onLensFacingChange = {
+                    StreamControl.setLensFacing(it)
                 }
-            }
-
-            // URL Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Stream URL", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(4.dp))
-                        Text(url, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                    }
-                    IconButton(onClick = {
-                        clipboard.setText(AnnotatedString(url))
-                        scope.launch { snackbarHostState.showSnackbar("URL copied!") }
-                    }) {
-                        Icon(Icons.Filled.ContentCopy, contentDescription = "Copy")
-                    }
-                }
-            }
-
-            // Controls Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Text("Settings", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-
-                    // Quality Slider
-                    Column {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Quality", style = MaterialTheme.typography.bodyMedium)
-                            Text("${quality.toInt()}%", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                        }
-                        Slider(
-                            value = quality,
-                            onValueChange = {
-                                quality = it
-                                com.example.mycam.service.StreamControl.setJpegQuality(quality.toInt())
-                            },
-                            valueRange = 40f..95f
-                        )
-                    }
-
-                    Divider()
-
-                    // Camera & Resolution
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-                                com.example.mycam.service.StreamControl.setLensFacing(lensFacing)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Filled.Cameraswitch, contentDescription = null, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(if (lensFacing == CameraSelector.LENS_FACING_BACK) "Back" else "Front")
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                resolution = when (resolution) {
-                                    com.example.mycam.model.Resolution.VGA -> com.example.mycam.model.Resolution.HD_720P
-                                    com.example.mycam.model.Resolution.HD_720P -> com.example.mycam.model.Resolution.FULL_HD
-                                    com.example.mycam.model.Resolution.FULL_HD -> com.example.mycam.model.Resolution.VGA
-                                }
-                                com.example.mycam.service.StreamControl.setResolution(resolution)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Filled.HighQuality, contentDescription = null, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(resolution.displayName)
-                        }
-                    }
-                }
-            }
+            )
 
             Spacer(Modifier.weight(1f))
 
-            // Start/Stop Button
-            Button(
-                onClick = {
-                    if (!streaming) {
-                        ContextCompat.startForegroundService(context, Intent(context, StreamingService::class.java))
-                    } else {
-                        context.stopService(Intent(context, StreamingService::class.java))
+            // 启动/停止按钮
+            StartStopButton(
+                streaming = streaming,
+                onStart = { streaming = true },
+                onStop = {
+                    streaming = false
+                    StreamViewModel.stopStreaming(context)
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun PreviewCard(
+    streaming: Boolean,
+    lensFacing: Int,
+    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    zoomRatio: Float,
+    onZoomChange: (Float) -> Unit,
+    cameraControl: androidx.camera.core.CameraControl?,
+    serviceCameraControl: androidx.camera.core.CameraControl?,
+    onCameraControlUpdate: (androidx.camera.core.CameraControl?) -> Unit,
+    fps: Int
+) {
+    val context = LocalContext.current
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            if (streaming) {
+                val openGlView = remember {
+                    OpenGlView(context).apply {
+                        setAspectRatioMode(AspectRatioMode.Adjust)
+                        setCameraFlip(lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_FRONT, false)
                     }
-                    streaming = !streaming
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (streaming) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                }
+                LaunchedEffect(lensFacing) {
+                    openGlView.setCameraFlip(lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_FRONT, false)
+                }
+                DisposableEffect(openGlView) {
+                    StreamPreviewHolder.setPreviewView(openGlView)
+                    onDispose { StreamPreviewHolder.clear() }
+                }
+                AndroidView(
+                    factory = { openGlView },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(12.dp))
                 )
-            ) {
-                Icon(
-                    if (streaming) Icons.Filled.Stop else Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    if (streaming) "Stop Streaming" else "Start Streaming",
-                    style = MaterialTheme.typography.titleMedium
+            } else {
+                val previewView = remember {
+                    androidx.camera.view.PreviewView(context).apply {
+                        implementationMode = androidx.camera.view.PreviewView.ImplementationMode.PERFORMANCE
+                    }
+                }
+                LaunchedEffect(lensFacing) {
+                    val future = ProcessCameraProvider.getInstance(context)
+                    future.addListener({
+                        try {
+                            val provider = future.get()
+                            val preview = androidx.camera.core.Preview.Builder().build().also {
+                                it.setSurfaceProvider(previewView.surfaceProvider)
+                            }
+                            val selector = if (lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_BACK) {
+                                androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA
+                            } else {
+                                androidx.camera.core.CameraSelector.DEFAULT_FRONT_CAMERA
+                            }
+                            provider.unbindAll()
+                            val camera = provider.bindToLifecycle(
+                                lifecycleOwner,
+                                selector,
+                                preview
+                            )
+                            onCameraControlUpdate(camera.cameraControl)
+                            camera.cameraControl.setZoomRatio(1f)
+                            onZoomChange(1f)
+                        } catch (_: Throwable) {}
+                    }, ContextCompat.getMainExecutor(context))
+                }
+                AndroidView(
+                    factory = { previewView },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(12.dp))
                 )
             }
+
+            // FPS 角标
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(12.dp),
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        if (streaming) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                        contentDescription = null,
+                        tint = if (streaming) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "$fps FPS",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        }
+
+        // Zoom 滑块
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Zoom",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "${String.format("%.1f", zoomRatio)}x",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                IconButton(
+                    onClick = {
+                        val newZoom = (zoomRatio - 0.5f).coerceAtLeast(1f)
+                        onZoomChange(newZoom)
+                        val control = serviceCameraControl ?: cameraControl
+                        control?.setZoomRatio(newZoom)
+                        StreamControl.requestZoom(newZoom)
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(Icons.Filled.Remove, contentDescription = "Zoom out", modifier = Modifier.size(20.dp))
+                }
+                Slider(
+                    value = zoomRatio,
+                    onValueChange = {
+                        onZoomChange(it)
+                        val control = serviceCameraControl ?: cameraControl
+                        control?.setZoomRatio(it)
+                        StreamControl.requestZoom(it)
+                    },
+                    valueRange = 1f..30f,
+                    modifier = Modifier.weight(1f),
+                    steps = 0
+                )
+                IconButton(
+                    onClick = {
+                        val newZoom = (zoomRatio + 0.5f).coerceAtMost(30f)
+                        onZoomChange(newZoom)
+                        val control = serviceCameraControl ?: cameraControl
+                        control?.setZoomRatio(newZoom)
+                        StreamControl.requestZoom(newZoom)
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = "Zoom in", modifier = Modifier.size(20.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RtpUrlCard(displayUrl: String, onCopy: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "RTSP URL",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    displayUrl,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            IconButton(onClick = onCopy) {
+                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsCard(
+    resolution: Resolution,
+    bitrateMbps: Int,
+    lensFacing: Int,
+    streaming: Boolean,
+    onResolutionChange: (Resolution) -> Unit,
+    onBitrateChange: (Int) -> Unit,
+    onLensFacingChange: (Int) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // 码率 (Mbps)
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "码率",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "$bitrateMbps Mbps",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Slider(
+                    value = bitrateMbps.toFloat(),
+                    onValueChange = { onBitrateChange(it.toInt().coerceIn(1, 12)) },
+                    valueRange = 1f..12f,
+                    steps = 10,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            // 分辨率 & 摄像头
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        val next = when (resolution) {
+                            Resolution.VGA -> Resolution.HD_720P
+                            Resolution.HD_720P -> Resolution.FULL_HD
+                            Resolution.FULL_HD -> Resolution.VGA
+                        }
+                        onResolutionChange(next)
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.HighQuality, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(resolution.displayName)
+                }
+                OutlinedButton(
+                    onClick = {
+                        val next = if (lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_BACK) {
+                            androidx.camera.core.CameraSelector.LENS_FACING_FRONT
+                        } else {
+                            androidx.camera.core.CameraSelector.LENS_FACING_BACK
+                        }
+                        onLensFacingChange(next)
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.Cameraswitch, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_BACK) "后置" else "前置")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StartStopButton(
+    streaming: Boolean,
+    onStart: () -> Unit,
+    onStop: () -> Unit
+) {
+    val buttonText = if (streaming) "停止推流" else "开始推流"
+    Button(
+        onClick = if (streaming) onStop else onStart,
+        modifier = Modifier.fillMaxWidth().height(56.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (streaming) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+        )
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (streaming) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = buttonText,
+                style = MaterialTheme.typography.titleMedium
+            )
         }
     }
 }

@@ -73,23 +73,22 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
     
-    // CameraX
+    // CameraX (保留，用于 MainActivity 预览；StreamingService 使用 RootEncoder Camera2)
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.lifecycle.service)
     
-    // Ktor Server
-    implementation(libs.ktor.server.core)
-    implementation(libs.ktor.server.cio)
-    implementation(libs.ktor.server.websockets)
+    // RootEncoder + RTSP-Server：硬件编码 H.264，零拷贝 Surface → MediaCodec
+    // RTSP-Server README 推荐 2.6.1，UDP 协议需此版本避免 setSocketsInfo NoSuchMethodError
+    implementation("com.github.pedroSG94.RootEncoder:library:2.6.1")
+    implementation("com.github.pedroSG94:RTSP-Server:1.3.6") {
+        exclude(group = "com.github.pedroSG94.RootEncoder", module = "library")
+    }
     
     // Permissions
     implementation(libs.accompanist.permissions)
-    
-    // (removed) RTSP streaming library placeholder – using existing HTTP/H.264 for now
-    // (pending) RTSP server integration via ZLMediaKit
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
